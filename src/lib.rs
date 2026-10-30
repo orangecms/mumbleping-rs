@@ -1,9 +1,12 @@
 use std::net::{Ipv4Addr, UdpSocket};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bincode::{Decode, Encode};
 use serde::Serialize;
 use thiserror::Error;
+
+/// Fallback to limit polling if no timeout is provided. Might need tweaking.
+const MAX_RECV_ATTEMPTS: u64 = 1_000_000;
 
 /*
 Width 	    Data type 	Value 	Comment
@@ -58,6 +61,10 @@ pub enum MumbleError {
     Encode(bincode::error::EncodeError),
     #[error("could not decode data: {0}")]
     Decode(bincode::error::DecodeError),
+    #[error("reached maximum receive attempts")]
+    MaxAttempts,
+    #[error("exceeded timeout")]
+    Timeout,
 }
 
 const ENCODING_CFG: bincode::config::Configuration<
@@ -67,10 +74,14 @@ const ENCODING_CFG: bincode::config::Configuration<
     .with_big_endian()
     .with_fixed_int_encoding();
 
-pub fn get_mumble_data(mumble_remote: &str) -> Result<Response, MumbleError> {
+pub fn get_mumble_data(
+    mumble_remote: &str,
+    timeout: Option<Duration>,
+) -> Result<Response, MumbleError> {
     tracing::debug!("creating socket");
     // client UDP socket with access to any interface/address and OS defined port
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(MumbleError::Socket)?;
+    socket.set_nonblocking(true).map_err(MumbleError::Socket)?;
     tracing::debug!("socket created");
 
     let now: u64 = SystemTime::now()
@@ -100,7 +111,31 @@ pub fn get_mumble_data(mumble_remote: &str) -> Result<Response, MumbleError> {
     //get request from socket
     let mut buf = [0; 24];
     tracing::debug!("receiving data");
-    socket.recv_from(&mut buf).map_err(MumbleError::Receive)?;
+    // poll until max attempts or timeout reached
+    let mut attempts = 0;
+    let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    loop {
+        match socket.recv_from(&mut buf) {
+            Ok((n, _addr)) => {
+                tracing::debug!("received {n} bytes");
+                break;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                attempts += 1;
+            }
+            Err(e) => {
+                return Err(MumbleError::Socket(e));
+            }
+        }
+        if let Some(t) = timeout {
+            let current = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            if (current - start) > t {
+                return Err(MumbleError::Timeout);
+            }
+        } else if attempts > MAX_RECV_ATTEMPTS {
+            return Err(MumbleError::MaxAttempts);
+        }
+    }
 
     let (server_version, ident, connected_users, max_users, bandwidth): (u32, u64, u32, u32, u32) =
         bincode::decode_from_slice(&buf, ENCODING_CFG)
@@ -159,7 +194,7 @@ mod tests {
             test_server();
         });
 
-        let result = get_mumble_data(mumble_remote).unwrap();
+        let result = get_mumble_data(mumble_remote, None).unwrap();
 
         let max_users: u32 = 12;
 
