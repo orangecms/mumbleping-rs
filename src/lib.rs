@@ -1,4 +1,4 @@
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{Ipv6Addr, UdpSocket};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bincode::{Decode, Encode};
@@ -80,7 +80,7 @@ pub fn get_mumble_data(
 ) -> Result<Response, MumbleError> {
     tracing::debug!("creating socket");
     // client UDP socket with access to any interface/address and OS defined port
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(MumbleError::Socket)?;
+    let socket = UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).map_err(MumbleError::Socket)?;
     socket.set_nonblocking(true).map_err(MumbleError::Socket)?;
     tracing::debug!("socket created");
 
